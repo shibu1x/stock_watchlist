@@ -1,0 +1,10 @@
+# Exclude everything except app directory
+*
+
+# Include app directory and its contents
+!app
+!app/**
+
+# Exclude specific directories in app
+app/data
+app/__pycache__

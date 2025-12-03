@@ -1,0 +1,62 @@
+version: '3'
+
+env:
+  NAME: stock-watchlist
+  REMOTE_PATH: /docker/cli/stock-watchlist
+
+dotenv: ['.env']
+
+tasks:
+  build:
+    cmds:
+      - task: amd
+        vars:
+          VERSION: latest
+  amd:
+    internal: true
+    cmds:
+      - | 
+        docker buildx build \
+          --builder ${AMD64_BUILDER} \
+          --platform linux/amd64 \
+          --build-arg apt_cacher=${APT_CACHER} \
+          --push -t ${REGISTRY}/${NAME}:{{.VERSION}} .
+      - ssh ${REMOTE_HOST} "docker pull ${REGISTRY}/${NAME}:{{.VERSION}}"
+    silent: true
+
+  arm:
+    internal: true
+    cmds:
+      - | 
+        docker buildx build \
+          --platform linux/arm64 \
+          --build-arg apt_cacher=${APT_CACHER} \
+          --push -t ${REGISTRY}/${NAME}:{{.VERSION}} .
+    silent: true
+
+  dev:
+    desc: Build development Docker image using Dockerfile.dev
+    cmds:
+      - |
+        docker buildx build \
+          --platform linux/arm64 \
+          --build-arg apt_cacher=${APT_CACHER} \
+          -f Dockerfile.dev \
+          --push -t ${REGISTRY}/${NAME}:dev .
+    silent: true
+
+  upload:
+    desc: Upload watchlist.csv to remote server
+    aliases: [up]
+    cmds:
+      - echo "Uploading watchlist.csv to remote server..."
+      - scp app/data/watchlist.csv ${REMOTE_HOST}:${REMOTE_PATH}
+      - echo "✓ Upload completed successfully"
+
+  download:
+    desc: Download database from remote server
+    aliases: [down]
+    cmds:
+      - echo "Downloading stock_watchlist.db from remote server..."
+      - scp ${REMOTE_HOST}:${REMOTE_PATH}/stock_watchlist.db app/data/
+      - echo "✓ Download completed successfully"

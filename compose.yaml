@@ -1,0 +1,12 @@
+services:
+  dev:
+    # docker compose run --rm dev /bin/bash
+    image: ${REGISTRY}/stock-watchlist:dev
+    tty: true
+    environment:
+      - DB_PATH
+      - DISCORD_WEBHOOK_URL
+      - DEFAULT_NOTIFY_DAYS_BEFORE
+      - PRICE_CHANGE_THRESHOLD
+    volumes:
+      - ./app:/app:delegated
