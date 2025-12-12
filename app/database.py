@@ -47,10 +47,7 @@ class Database:
                 ma75 REAL,
                 prev_ma25 REAL,
                 prev_ma75 REAL,
-                note TEXT,
-                added_date TEXT NOT NULL,
-                last_updated TEXT,
-                last_api_call TEXT
+                note TEXT
             )
         """)
 
@@ -79,7 +76,7 @@ class Database:
                   eps: float = None, per: float = None,
                   ma25: float = None, ma75: float = None,
                   prev_ma25: float = None, prev_ma75: float = None,
-                  note: str = None, last_api_call: str = None) -> bool:
+                  note: str = None) -> bool:
         """
         Add a stock to the watchlist
 
@@ -100,7 +97,6 @@ class Database:
             prev_ma25: Previous 25-day moving average
             prev_ma75: Previous 75-day moving average
             note: Note/remarks
-            last_api_call: Last API call timestamp
 
         Returns:
             True if successfully added
@@ -109,23 +105,13 @@ class Database:
             conn = self.get_connection()
             cursor = conn.cursor()
 
-            now = datetime.now().isoformat()
-
-            # Only set last_updated if we have API data (price, earnings_date, etc.)
-            # If only code/name are provided, keep last_updated as NULL so update will fetch data
-            has_api_data = any([
-                earnings_date, price, prev_price, dividend, dividend_yield,
-                eps, per, ma25, ma75
-            ])
-            last_updated_value = now if has_api_data else None
-
             cursor.execute("""
                 INSERT INTO watchlist
                 (code, name, market, earnings_date, price, prev_price,
-                 price_change_rate, dividend, dividend_yield, eps, per, ma25, ma75, prev_ma25, prev_ma75, note, added_date, last_updated, last_api_call)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 price_change_rate, dividend, dividend_yield, eps, per, ma25, ma75, prev_ma25, prev_ma75, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (code, name, market, earnings_date, price, prev_price,
-                  price_change_rate, dividend, dividend_yield, eps, per, ma25, ma75, prev_ma25, prev_ma75, note, now, last_updated_value, last_api_call))
+                  price_change_rate, dividend, dividend_yield, eps, per, ma25, ma75, prev_ma25, prev_ma75, note))
 
             conn.commit()
             cursor.close()
@@ -162,7 +148,7 @@ class Database:
                      eps: float = None, per: float = None,
                      ma25: float = None, ma75: float = None,
                      prev_ma25: float = None, prev_ma75: float = None,
-                     note: str = None, last_api_call: str = None) -> bool:
+                     note: str = None) -> bool:
         """
         Update stock information in the watchlist
 
@@ -183,7 +169,6 @@ class Database:
             prev_ma25: Previous 25-day moving average
             prev_ma75: Previous 75-day moving average
             note: Note/remarks
-            last_api_call: Last API call timestamp
 
         Returns:
             True if successfully updated
@@ -254,17 +239,11 @@ class Database:
             updates.append("note = ?")
             params.append(note)
 
-        if last_api_call is not None:
-            updates.append("last_api_call = ?")
-            params.append(last_api_call)
-
         if not updates:
             cursor.close()
             conn.close()
             return False
 
-        updates.append("last_updated = ?")
-        params.append(datetime.now().isoformat())
         params.append(code)
 
         query = f"UPDATE watchlist SET {', '.join(updates)} WHERE code = ?"
