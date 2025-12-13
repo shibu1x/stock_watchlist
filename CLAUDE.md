@@ -18,12 +18,12 @@ docker compose run --rm dev python main.py [command]
 docker compose run --rm dev python main.py run --market jp                    # uses data/watchlist.csv, update JP stocks
 docker compose run --rm dev python main.py run --market us -v                 # update US stocks with verbose output
 docker compose run --rm dev python main.py run my_stocks.csv --market jp -v   # custom CSV file
-docker compose run --rm dev python main.py run --market jp -f                 # force update (skip 6-hour cache)
+docker compose run --rm dev python main.py run --market jp -k                 # update JP stocks and refresh Kabutan data
 
 # Update all watchlist stocks (market required)
 docker compose run --rm dev python main.py update --market jp        # update JP stocks only
 docker compose run --rm dev python main.py update --market us -v     # update US stocks with verbose output
-docker compose run --rm dev python main.py update --market jp -f     # force update (skip 6-hour cache)
+docker compose run --rm dev python main.py update --market jp -k     # update JP stocks and refresh Kabutan data
 
 # Import/export stock lists
 docker compose run --rm dev python main.py import                 # import from data/watchlist.csv
@@ -67,7 +67,8 @@ stock_watchlist/
 └── app/
     ├── main.py            # CLI entry point and commands (Click framework)
     ├── database.py        # SQLite operations
-    ├── stock_api.py       # Stock data fetching/scraping
+    ├── stock_api.py       # Stock data fetching from yfinance
+    ├── kabutan_api.py     # Stock data scraping from Kabutan.jp (JP stocks only)
     ├── notifier.py        # Discord webhook notifications
     ├── config.py          # Environment-based configuration
     ├── requirements.txt   # Python dependencies
@@ -81,20 +82,20 @@ stock_watchlist/
 1. **Stock Import/Update Flow (`run` command)**:
    - Step 1: `_do_import()` reads CSV file, adds new stocks or updates name/note for existing stocks
      - Market is auto-detected from stock code: 4-digit starting with number = jp, else = us
-   - Step 2: `_do_update_all(verbose, force, market)` updates stocks in specified market
+   - Step 2: `_do_update_all(verbose, market, update_kabutan)` updates stocks in specified market
      - **Important**: Requires `--market` option (jp or us)
-     - Respects 6-hour API call cache unless `--force` flag is used
-     - Skips stocks where API was called within last 6 hours (based on `last_api_call`)
+     - **JP market**: EPS/dividend fetched from Kabutan if null or if `--kabutan` flag is used
+     - **US market**: EPS/dividend always fetched from yfinance
    - Step 3: `_do_check()` checks for upcoming earnings and sends notifications
 
 2. **Manual Update Flow (`update` command)**:
    - **Important**: Requires `--market` option (jp or us) to specify which market to update
-   - Respects 6-hour cache: skips stocks where API was called within last 6 hours unless `-f` flag is used
-   - Uses `last_api_call` timestamp to determine if API call is needed
-   - `stock_api.StockAPI` fetches data from multiple sources in priority order:
-     - Basic info: yfinance API
-     - Earnings date: Yahoo Finance Japan → Kabutan → yfinance (first successful)
-   - `database.Database` updates stock data and sets both `last_updated` and `last_api_call` timestamps
+   - **Data Sources**:
+     - **JP stocks**: Price/MA from yfinance, EPS/dividend from Kabutan (only if null or `--kabutan` flag)
+     - **US stocks**: Price/MA/EPS/dividend all from yfinance
+   - `stock_api.StockAPI` fetches price, prev_price, MA25, MA75, earnings_date from yfinance
+   - `kabutan_api.KabutanAPI` fetches revised EPS and dividend from Kabutan.jp (JP stocks only)
+   - `database.Database` updates stock data
 
 3. **Notification Flow (`check` command)**:
    - `check` command runs (triggered by cron or manually)
@@ -109,16 +110,12 @@ stock_watchlist/
 
 **watchlist table**:
 - Stores stock information with price data, dividend yield, PER metrics, and earnings dates
-- Key fields: `code` (unique), `name`, `market`, `earnings_date`, `price`, `prev_price`, `price_change_rate`, `dividend`, `dividend_yield`, `eps`, `per`, `ma25`, `ma75`, `prev_ma25`, `prev_ma75`, `note`, `added_date`, `last_updated`, `last_api_call`
+- Key fields: `code` (unique), `name`, `market`, `earnings_date`, `price`, `prev_price`, `price_change_rate`, `dividend`, `dividend_yield`, `eps`, `per`, `ma25`, `ma75`, `prev_ma25`, `prev_ma75`, `note`
 - Note: `dividend`, `eps`, and MA fields are stored in database but not displayed in Discord notifications
 - **Market field**: Stores market type (`jp` or `us`), auto-detected from stock code during import
   - 4-digit code starting with number = `jp` (e.g., 7203, 9984)
   - Other codes = `us` (e.g., AAPL, MSFT)
-- **Timestamp fields**:
-  - `last_updated`: Database record update timestamp (set on every `update_stock()` call)
-  - `last_api_call`: API call timestamp (set when `stock_api.get_stock_info()` is called)
-  - Used to prevent excessive API calls (6-hour cache based on `last_api_call`)
-- `prev_ma25` and `prev_ma75` are automatically saved before updating MA values (used for cross detection)
+- **MA fields**: `prev_ma25` and `prev_ma75` are automatically saved before updating MA values (used for cross detection)
 
 ### Configuration Management
 
@@ -132,30 +129,36 @@ Set environment variables in your shell or use a process manager. The `.env.exam
 
 ### Stock Data Scraping
 
-The `stock_api.StockAPI` class implements a multi-source fallback strategy:
+The application uses two separate APIs for different data:
 
-1. **Primary API (yfinance)**: Used for stock name, price, prev_price, dividend (dividendRate), and dividend yield (dividendYield)
-   - **EPS Data Sources** (tried in order):
-     - **Yahoo Finance Japan**: Scrapes EPS using regex patterns for Japanese format
-     - **Kabutan**: Backup scraper for EPS data
-     - **yfinance**: Fallback to trailingEps/forwardEps if scraping fails
-   - **PER Calculation**: Always calculated as `PER = price ÷ EPS` when both values are available. Falls back to yfinance trailingPE/forwardPE only if calculation is not possible.
-2. **Earnings Date Sources** (tried in order):
-   - **Yahoo Finance Japan**: Scrapes earnings dates using BeautifulSoup with Japanese regex patterns
-   - **Kabutan**: Backup Japanese financial website scraper
-   - **yfinance calendar**: US Yahoo Finance API fallback
+#### 1. **yfinance API (`stock_api.StockAPI`)**:
+   - **Data retrieved**: price, prev_price, ma25, ma75, prev_ma25, prev_ma75, earnings_date
+   - **US stocks only**: Also retrieves eps (trailingEps/forwardEps) and dividend (dividendRate/lastDividend)
+   - **Earnings date**: Fetched from `stock.calendar` API
+   - **JP stocks**: `.T` suffix automatically added for Yahoo Finance API calls (e.g., "7203" → "7203.T")
+   - **US stocks**: Ticker symbols used directly (e.g., "AAPL", "MSFT")
+
+#### 2. **Kabutan API (`kabutan_api.KabutanAPI`)** - JP stocks only:
+   - **Data retrieved**: eps (修正1株益), dividend (修正1株配)
+   - **Scraping strategy**:
+     - Prioritizes company forecast values ("予") over actual results
+     - Falls back to actual results if forecast is "－" (undefined)
+     - Skips comparison rows ("前期比", "前年同期比", "同期比")
+   - **When used**:
+     - Automatically when EPS is null in database (for JP market)
+     - Manually with `--kabutan` flag to refresh data
+   - **Rate limiting**: 0.5s delay between requests
+   - **User-Agent**: Included to prevent bot blocking
+
+#### 3. **PER Calculation**:
+   - Always calculated in `main.py` as `PER = price ÷ EPS` when both values are available
+   - Never uses yfinance's pre-calculated PER values
 
 **Key Implementation Details**:
-- **JP stocks**: 4-digit codes (e.g., "7203" for Toyota)
-  - `.T` suffix automatically added for Yahoo Finance API calls
-  - Regex patterns match both "YYYY年MM月DD日" and "YYYY/MM/DD" date formats
-  - Scrapes from Japanese financial websites (Yahoo Finance Japan, Kabutan)
-- **US stocks**: Ticker symbols (e.g., "AAPL", "MSFT")
-  - Uses yfinance API directly without suffix
-  - Primarily uses US Yahoo Finance data
+- **JP stocks**: Price/MA from yfinance, EPS/dividend from Kabutan
+- **US stocks**: All data from yfinance
 - Only future dates are considered valid earnings dates
-- 0.5s delay between source attempts to avoid rate limiting
-- User-Agent headers included to prevent bot blocking
+- MA values are calculated using pandas rolling window (25-day and 75-day)
 
 ### Discord Notifications
 
@@ -204,9 +207,9 @@ SQLite schema auto-initializes on first run. To add columns:
 3. Update relevant CRUD methods (`add_stock`, `update_stock`, etc.)
 
 **Recent migrations**:
-- `prev_ma25`, `prev_ma75`: Added for MA cross detection (database.py:97-100)
-- `market`: Added to store market type (jp/us) (database.py:103-105)
-- `last_api_call`: Added to track API call timestamps for rate limiting (database.py:107-109)
+- `prev_ma25`, `prev_ma75`: Added for MA cross detection
+- `market`: Added to store market type (jp/us)
+- `added_date`, `last_updated`, `last_api_call`: Removed (no longer needed)
 
 ### CLI Command Structure
 
@@ -218,11 +221,11 @@ All CLI commands use Click framework:
 
 **Important implementation notes**:
 - Both `run` and `update` commands require `--market` option (jp or us) to specify which market to update
-- Both commands respect the 6-hour API call cache unless `--force` flag is used
-- 6-hour cache is based on `last_api_call` timestamp, not `last_updated`
+- `--kabutan/-k` option: Forces refresh of EPS and dividend from Kabutan even if already exists (JP market only)
 - `_do_import()` auto-detects market from stock code: 4-digit starting with number = jp, else = us
 - Market detection happens at import time and is stored in the `market` field
 - Business days (Monday-Friday) are used for earnings notification window calculations via `_count_business_days()`
+- PER and dividend_yield are calculated in main.py using database values, not fetched from APIs
 
 ### CSV Import/Export Format
 

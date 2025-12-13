@@ -5,6 +5,7 @@ import csv
 from pathlib import Path
 from database import Database
 from stock_api import StockAPI
+from kabutan_api import KabutanAPI
 from notifier import DiscordNotifier
 from config import Config
 from datetime import datetime, timedelta
@@ -13,6 +14,7 @@ from datetime import datetime, timedelta
 # Database instances
 db = Database()
 stock_api = StockAPI()
+kabutan_api = KabutanAPI()
 notifier = DiscordNotifier()
 
 
@@ -136,13 +138,13 @@ def _do_import(input_file):
     return {'added': added_count, 'updated': updated_count, 'failed': failed_count, 'total': total_stocks}
 
 
-def _do_update_all(verbose=False, force=False, market='jp'):
+def _do_update_all(verbose=False, market='jp', update_kabutan=False):
     """Update all stocks and return summary
 
     Args:
         verbose: Show detailed information
-        force: Force update even if API was called within 6 hours
         market: Market to filter (jp or us). Defaults to 'jp'.
+        update_kabutan: Update EPS and dividend from Kabutan even if already exists
     """
     stocks = db.get_all_stocks()
 
@@ -160,7 +162,6 @@ def _do_update_all(verbose=False, force=False, market='jp'):
     total_stocks = len(stocks)
     success_count = 0
     failed_count = 0
-    skipped_count = 0
 
     market_msg = f" ({market.upper()} market)" if market else ""
     click.echo(f"Updating {total_stocks} stocks{market_msg}...\n")
@@ -171,55 +172,60 @@ def _do_update_all(verbose=False, force=False, market='jp'):
         click.echo(f"[{idx}/{total_stocks}] Updating stock: {code}")
         click.echo("-" * 60)
 
-        # Check if API was called within last 6 hours (skip if not forced)
-        if not force and stock.get('last_api_call'):
-            try:
-                last_api_call = datetime.fromisoformat(stock['last_api_call'])
-                time_diff = datetime.now() - last_api_call
-                hours_since_api_call = time_diff.total_seconds() / 3600
+        # If EPS is null or update_kabutan is True, fetch from Kabutan first (JP market only)
+        eps = stock.get('eps')
+        dividend = stock.get('dividend')
 
-                if hours_since_api_call < 6:
-                    click.echo(f"Skipped (API called {hours_since_api_call:.1f} hours ago, use -f to force)")
-                    skipped_count += 1
-                    continue
-            except (ValueError, TypeError):
-                pass
+        if (eps is None or update_kabutan) and market == 'jp':
+            click.echo("Fetching EPS and dividend from Kabutan...")
+            kabutan_info = kabutan_api.get_stock_info(code, verbose=verbose)
+            if kabutan_info:
+                eps = kabutan_info.get('eps')
+                dividend = kabutan_info.get('dividend')
+                if verbose:
+                    if eps is not None:
+                        click.echo(f"EPS (Revised): ¥{eps:,.2f}")
+                    if dividend is not None:
+                        click.echo(f"Dividend (Revised): ¥{dividend:,.2f}")
 
         # Fetch stock information
         click.echo("Fetching stock information...")
         info = stock_api.get_stock_info(code)
-
-        # Record API call time
-        api_call_time = datetime.now().isoformat()
 
         if not info:
             click.echo(f"Error: Could not fetch information for stock {code}", err=True)
             failed_count += 1
             continue
 
-        # Only update name if not already registered
-        existing_name = stock.get('name')
-        if existing_name:
-            name = None
-            display_name = existing_name
-        else:
-            name = info.get('name')
-            display_name = name
+        # Use existing name from database
+        display_name = stock.get('name') or code
 
         price = info.get('price')
         prev_price = info.get('prev_price')
-        dividend = info.get('dividend')
-        dividend_yield = info.get('dividend_yield')
-        eps = info.get('eps')
-        per = info.get('per')
         ma25 = info.get('ma25')
         ma75 = info.get('ma75')
         prev_ma25 = info.get('prev_ma25')
         prev_ma75 = info.get('prev_ma75')
+        earnings_date = info.get('earnings_date')
+
+        # Use yfinance EPS and dividend for US market
+        if market == 'us':
+            eps = info.get('eps')
+            dividend = info.get('dividend')
 
         price_change_rate = None
         if price and prev_price and prev_price > 0:
             price_change_rate = ((price - prev_price) / prev_price) * 100
+
+        # Calculate PER from EPS
+        per = None
+        if price and eps and eps > 0:
+            per = price / eps
+
+        # Calculate dividend yield from dividend
+        dividend_yield = None
+        if price and dividend and price > 0:
+            dividend_yield = (dividend / price) * 100
 
         click.echo(f"Stock name: {display_name}")
         if price:
@@ -232,34 +238,16 @@ def _do_update_all(verbose=False, force=False, market='jp'):
                 click.echo(f"25-day MA: ¥{ma25:,.2f}")
             if ma75:
                 click.echo(f"75-day MA: ¥{ma75:,.2f}")
-            if dividend:
-                click.echo(f"Dividend: ¥{dividend:,.2f}")
-                if dividend_yield:
-                    click.echo(f"Dividend yield: {dividend_yield:.2f}%")
-            elif dividend_yield:
-                click.echo(f"Dividend yield: {dividend_yield:.2f}%")
-            if eps:
-                click.echo(f"EPS (Trailing): ¥{eps:,.2f}")
-                if per:
-                    click.echo(f"PER: {per:.2f}")
-            elif per:
-                click.echo(f"PER: {per:.2f}")
-
-        # Fetch earnings date
-        click.echo("Fetching earnings date...")
-        earnings_date = stock_api.get_earnings_date(code, verbose=verbose)
-        if earnings_date:
-            click.echo(f"Earnings date: {earnings_date}")
-        else:
-            click.echo("Warning: Could not fetch earnings date")
+            if per:
+                click.echo(f"PER (calculated): {per:.2f}")
+            if dividend_yield:
+                click.echo(f"Dividend yield (calculated): {dividend_yield:.2f}%")
 
         # Update stock
-        success = db.update_stock(code, name=name, earnings_date=earnings_date,
+        success = db.update_stock(code, earnings_date=earnings_date,
                                  price=price, prev_price=prev_price, price_change_rate=price_change_rate,
-                                 dividend=dividend, dividend_yield=dividend_yield,
-                                 eps=eps, per=per, ma25=ma25, ma75=ma75,
-                                 prev_ma25=prev_ma25, prev_ma75=prev_ma75,
-                                 last_api_call=api_call_time)
+                                 eps=eps, dividend=dividend, per=per, dividend_yield=dividend_yield,
+                                 ma25=ma25, ma75=ma75, prev_ma25=prev_ma25, prev_ma75=prev_ma75)
         if success:
             click.echo(f"✓ Stock updated: {display_name}")
             success_count += 1
@@ -270,13 +258,10 @@ def _do_update_all(verbose=False, force=False, market='jp'):
         click.echo("")
 
     click.echo("=" * 60)
-    summary_parts = [f"{success_count} succeeded", f"{failed_count} failed"]
-    if skipped_count > 0:
-        summary_parts.append(f"{skipped_count} skipped")
-    click.echo(f"Summary: {', '.join(summary_parts)} out of {total_stocks} stocks")
+    click.echo(f"Summary: {success_count} succeeded, {failed_count} failed out of {total_stocks} stocks")
     click.echo("=" * 60)
 
-    return {'success': success_count, 'failed': failed_count, 'skipped': skipped_count, 'total': total_stocks}
+    return {'success': success_count, 'failed': failed_count, 'total': total_stocks}
 
 
 def _do_check(market='jp'):
@@ -418,21 +403,20 @@ def remove(code):
 @cli.command()
 @click.option('--market', '-m', type=click.Choice(['jp', 'us']), default='jp', help='Market to update (jp or us). Defaults to jp.')
 @click.option('--verbose', '-v', is_flag=True, help='Show detailed information')
-@click.option('--force', '-f', is_flag=True, help='Force update even if API was called within 6 hours')
-def update(market, verbose, force):
+@click.option('--kabutan', '-k', is_flag=True, help='Update EPS and dividend from Kabutan even if already exists (JP only)')
+def update(market, verbose, kabutan):
     """Update information for watchlist stocks in specified market
 
     Fetches latest stock information and earnings dates for registered stocks in the specified market.
-    Skips stocks where API was called within the last 6 hours unless --force is specified.
 
     Examples:
       python main.py update                    # update JP stocks (default)
       python main.py update --market jp        # update JP stocks
       python main.py update -m us -v           # update US stocks with verbose output
-      python main.py update --market jp -f     # force update all JP stocks
+      python main.py update -k                 # update JP stocks and refresh Kabutan data
     """
     click.echo("")
-    _do_update_all(verbose, force, market)
+    _do_update_all(verbose, market, update_kabutan=kabutan)
 
 
 @cli.command()
@@ -521,8 +505,8 @@ def import_from_file(input_file):
 @click.argument('input_file', type=click.Path(exists=True), default='data/watchlist.csv')
 @click.option('--market', '-m', type=click.Choice(['jp', 'us']), default='jp', help='Market to update (jp or us). Defaults to jp.')
 @click.option('--verbose', '-v', is_flag=True, help='Show detailed information')
-@click.option('--force', '-f', is_flag=True, help='Force update even if API was called within 6 hours')
-def run(input_file, market, verbose, force):
+@click.option('--kabutan', '-k', is_flag=True, help='Update EPS and dividend from Kabutan even if already exists (JP only)')
+def run(input_file, market, verbose, kabutan):
     """Run import, update, and check in sequence
 
     This command executes the following steps:
@@ -534,7 +518,7 @@ def run(input_file, market, verbose, force):
       python main.py run                                # uses data/watchlist.csv, update JP stocks (default)
       python main.py run --market jp                    # uses data/watchlist.csv, update JP stocks
       python main.py run -m us -v                       # update US stocks with verbose output
-      python main.py run --market jp -f                 # force update all JP stocks
+      python main.py run -k                             # update JP stocks and refresh Kabutan data
       python main.py run my_stocks.csv --market us -v   # custom CSV, update US stocks
     """
     # Step 1: Import
@@ -558,7 +542,7 @@ def run(input_file, market, verbose, force):
     click.echo("=" * 80)
     click.echo("")
 
-    _do_update_all(verbose, force, market=market)
+    _do_update_all(verbose, market=market, update_kabutan=kabutan)
 
     # Step 3: Check
     click.echo("\n")
