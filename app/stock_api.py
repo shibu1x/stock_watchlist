@@ -82,43 +82,11 @@ class StockAPI:
             except Exception:
                 pass
 
-            # Calculate moving averages
-            ma25 = None
-            ma75 = None
-            prev_ma25 = None
-            prev_ma75 = None
-            try:
-                # Get historical data (need 75 days + buffer for calculation)
-                hist = stock.history(period='6mo')
-                if not hist.empty and 'Close' in hist.columns:
-                    # Calculate 25-day moving average
-                    if len(hist) >= 25:
-                        ma_series_25 = hist['Close'].rolling(window=25).mean()
-                        ma25 = ma_series_25.iloc[-1]
-                        # Get previous day's MA25 if available
-                        if len(ma_series_25) >= 2:
-                            prev_ma25 = ma_series_25.iloc[-2]
-
-                    # Calculate 75-day moving average
-                    if len(hist) >= 75:
-                        ma_series_75 = hist['Close'].rolling(window=75).mean()
-                        ma75 = ma_series_75.iloc[-1]
-                        # Get previous day's MA75 if available
-                        if len(ma_series_75) >= 2:
-                            prev_ma75 = ma_series_75.iloc[-2]
-            except Exception as e:
-                print(f"Warning: Failed to calculate moving averages ({code}): {e}")
-
             stock_info = {
                 'code': code,
                 'price': current_price,
-                'prev_price': info.get('previousClose'),
                 'eps': eps,
                 'dividend': dividend,
-                'ma25': ma25,
-                'ma75': ma75,
-                'prev_ma25': prev_ma25,
-                'prev_ma75': prev_ma75,
                 'earnings_date': earnings_date,
             }
 
@@ -126,4 +94,41 @@ class StockAPI:
 
         except Exception as e:
             print(f"Error: Failed to retrieve stock information ({code}): {e}")
+            return None
+
+    @staticmethod
+    def get_price_history(code: str, period: str = '1y') -> Optional[list]:
+        """
+        Get historical price data
+
+        Args:
+            code: Stock code
+            period: Data period (1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max)
+
+        Returns:
+            List of dictionaries with keys: date, close
+            Returns None if unable to retrieve
+        """
+        try:
+            ticker = StockAPI.format_jp_ticker(code)
+            stock = yf.Ticker(ticker)
+
+            # Get historical data
+            hist = stock.history(period=period)
+
+            if hist.empty or 'Close' not in hist.columns:
+                return None
+
+            # Convert to list of dictionaries
+            price_history = []
+            for date, row in hist.iterrows():
+                price_history.append({
+                    'date': date.strftime('%Y-%m-%d'),
+                    'close': row['Close']
+                })
+
+            return price_history
+
+        except Exception as e:
+            print(f"Error: Failed to retrieve price history ({code}): {e}")
             return None

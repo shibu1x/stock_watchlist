@@ -197,15 +197,46 @@ def _do_update_all(verbose=False, market='jp', update_kabutan=False):
             failed_count += 1
             continue
 
+        # Fetch and save price history
+        click.echo("Fetching price history...")
+        price_history = stock_api.get_price_history(code, period='1y')
+        if price_history:
+            # Prepare bulk data
+            price_data = [
+                {
+                    'stock_code': code,
+                    'date': item['date'],
+                    'close': item['close']
+                }
+                for item in price_history
+            ]
+            # Save to database
+            saved_count = db.save_price_history_bulk(price_data)
+            if verbose:
+                click.echo(f"Saved {saved_count} price history records")
+        else:
+            if verbose:
+                click.echo("No price history data available")
+
+        # Calculate moving averages from price history
+        click.echo("Calculating moving averages...")
+        ma_success = db.calculate_moving_averages(code)
+        if ma_success and verbose:
+            # Get latest MA data for verbose output
+            ma_history = db.get_price_history(code, limit=1)
+            if ma_history and ma_history[0].get('ma25'):
+                ma25 = ma_history[0]['ma25']
+                ma75 = ma_history[0]['ma75']
+                click.echo(f"MA25: {ma25:,.2f}")
+                if ma75:
+                    click.echo(f"MA75: {ma75:,.2f}")
+        elif not ma_success and verbose:
+            click.echo("Insufficient data for moving averages")
+
         # Use existing name from database
         display_name = stock.get('name') or code
 
         price = info.get('price')
-        prev_price = info.get('prev_price')
-        ma25 = info.get('ma25')
-        ma75 = info.get('ma75')
-        prev_ma25 = info.get('prev_ma25')
-        prev_ma75 = info.get('prev_ma75')
         earnings_date = info.get('earnings_date')
 
         # Use yfinance EPS and dividend for US market
@@ -213,9 +244,8 @@ def _do_update_all(verbose=False, market='jp', update_kabutan=False):
             eps = info.get('eps')
             dividend = info.get('dividend')
 
-        price_change_rate = None
-        if price and prev_price and prev_price > 0:
-            price_change_rate = ((price - prev_price) / prev_price) * 100
+        # Calculate price change rate from price history
+        price_change_rate = db.calculate_price_change_rate(code)
 
         # Calculate PER from EPS
         per = None
@@ -227,6 +257,21 @@ def _do_update_all(verbose=False, market='jp', update_kabutan=False):
         if price and dividend and price > 0:
             dividend_yield = (dividend / price) * 100
 
+        # Calculate price breakouts
+        click.echo("Calculating price breakouts...")
+        high_breakout = None
+        low_breakout = None
+        if price:
+            breakout_data = db.calculate_price_breakouts(code, price)
+            if breakout_data:
+                high_breakout = breakout_data.get('high_breakout')
+                low_breakout = breakout_data.get('low_breakout')
+                if verbose:
+                    if high_breakout:
+                        click.echo(f"High breakout: {high_breakout} days")
+                    if low_breakout:
+                        click.echo(f"Low breakout: {low_breakout} days")
+
         click.echo(f"Stock name: {display_name}")
         if price:
             click.echo(f"Current price: ¥{price:,.0f}")
@@ -234,10 +279,6 @@ def _do_update_all(verbose=False, market='jp', update_kabutan=False):
                 click.echo(f"Change: {price_change_rate:+.2f}%")
 
         if verbose:
-            if ma25:
-                click.echo(f"25-day MA: ¥{ma25:,.2f}")
-            if ma75:
-                click.echo(f"75-day MA: ¥{ma75:,.2f}")
             if per:
                 click.echo(f"PER (calculated): {per:.2f}")
             if dividend_yield:
@@ -245,9 +286,10 @@ def _do_update_all(verbose=False, market='jp', update_kabutan=False):
 
         # Update stock
         success = db.update_stock(code, earnings_date=earnings_date,
-                                 price=price, prev_price=prev_price, price_change_rate=price_change_rate,
+                                 price=price, price_change_rate=price_change_rate,
                                  eps=eps, dividend=dividend, per=per, dividend_yield=dividend_yield,
-                                 ma25=ma25, ma75=ma75, prev_ma25=prev_ma25, prev_ma75=prev_ma75)
+                                 high_breakout=high_breakout, low_breakout=low_breakout,
+                                 update_breakouts=True)
         if success:
             click.echo(f"✓ Stock updated: {display_name}")
             success_count += 1
@@ -265,13 +307,24 @@ def _do_update_all(verbose=False, market='jp', update_kabutan=False):
 
 
 def _do_check(market='jp'):
-    """Check for upcoming earnings, price changes, MA crosses, and pullback opportunities, then send notifications
+    """Check for upcoming earnings, price changes, MA crosses, pullback opportunities, and price breakouts, then send notifications
 
     Args:
         market: Market to filter (jp or us). Defaults to 'jp'.
     """
     market_msg = f" ({market.upper()} market)" if market else ""
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Checking earnings dates, price changes, MA crosses, and pullback opportunities{market_msg}...")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Checking earnings dates, price changes, MA crosses, pullback opportunities, and price breakouts{market_msg}...")
+
+    # Check if market is closed
+    if db.is_market_closed(market):
+        print(f"Market is closed ({market.upper()}). Skipping notifications.")
+        return 0
+
+    # Send daily report header
+    today = datetime.now().strftime('%Y-%m-%d')
+    market_name = "JP" if market == 'jp' else "US"
+    report_header = f"{market_name} Market Daily Report ({today})"
+    notifier.send_message(f"📊 **{report_header}**")
 
     # Check earnings dates
     notify_days_before = Config.DEFAULT_NOTIFY_DAYS_BEFORE
@@ -373,8 +426,28 @@ def _do_check(market='jp'):
     else:
         print("No pullback opportunity notifications to send")
 
-    total_notified = earnings_notified + price_notified + ma_cross_notified + pullback_notified
-    print(f"Total notifications sent: {total_notified} (earnings: {earnings_notified}, price change: {price_notified}, MA cross: {ma_cross_notified}, pullback: {pullback_notified})")
+    # Check price breakouts (high_breakout or low_breakout is not NULL)
+    breakout_stocks = db.get_stocks_with_breakouts(market=market)
+
+    # Send price breakout notifications
+    breakout_notified = 0
+    if breakout_stocks:
+        high_count = sum(1 for s in breakout_stocks if s.get('high_breakout'))
+        low_count = sum(1 for s in breakout_stocks if s.get('low_breakout'))
+        print(f"Price breakout notification targets: {len(breakout_stocks)} stocks (high: {high_count}, low: {low_count})")
+
+        success = notifier.send_breakout_notification(breakout_stocks)
+
+        if success:
+            print("Price breakout notification completed")
+            breakout_notified = len(breakout_stocks)
+        else:
+            print("Error: Failed to send price breakout notification")
+    else:
+        print("No price breakout notifications to send")
+
+    total_notified = earnings_notified + price_notified + ma_cross_notified + pullback_notified + breakout_notified
+    print(f"Total notifications sent: {total_notified} (earnings: {earnings_notified}, price change: {price_notified}, MA cross: {ma_cross_notified}, pullback: {pullback_notified}, breakout: {breakout_notified})")
 
     return total_notified
 
@@ -422,13 +495,14 @@ def update(market, verbose, kabutan):
 @cli.command()
 @click.option('--market', '-m', type=click.Choice(['jp', 'us']), default='jp', help='Market to check (jp or us). Defaults to jp.')
 def check(market):
-    """Check for upcoming earnings, price changes, MA crosses, and pullback opportunities, then send notifications
+    """Check for upcoming earnings, price changes, MA crosses, pullback opportunities, and price breakouts, then send notifications
 
-    This command checks four types of events:
+    This command checks five types of events:
     1. Upcoming earnings dates (within configured days)
     2. Significant price changes (above configured threshold)
     3. Moving average crosses (MA25 crossing MA75)
     4. Pullback opportunities (MA25 > MA75 && price < MA75)
+    5. Price breakouts (high_breakout or low_breakout is not NULL)
 
     This command is designed to be run by cron.
 

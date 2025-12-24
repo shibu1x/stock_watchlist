@@ -2,6 +2,11 @@ services:
   dev:
     # docker compose run --rm dev /bin/bash
     image: ${REGISTRY}/stock-watchlist:dev
+    build:
+      context: . 
+      args:
+        apt_cacher: ${APT_CACHER}
+      dockerfile: Dockerfile.dev
     tty: true
     environment:
       - DB_PATH

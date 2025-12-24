@@ -34,17 +34,6 @@ tasks:
           --push -t ${REGISTRY}/${NAME}:{{.VERSION}} .
     silent: true
 
-  dev:
-    desc: Build development Docker image using Dockerfile.dev
-    cmds:
-      - |
-        docker buildx build \
-          --platform linux/arm64 \
-          --build-arg apt_cacher=${APT_CACHER} \
-          -f Dockerfile.dev \
-          --push -t ${REGISTRY}/${NAME}:dev .
-    silent: true
-
   upload:
     desc: Upload watchlist.csv to remote server
     aliases: [up]
