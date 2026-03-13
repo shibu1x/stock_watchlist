@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """Japanese Stock Watchlist Management Tool - Main Program"""
+import os
 import click
 import csv
 from pathlib import Path
 from database import Database
-from stock_api import StockAPI
+from yfinance_api import YFinanceAPI
 from kabutan_api import KabutanAPI
 from notifier import DiscordNotifier
-from config import Config
 from datetime import datetime, timedelta
 
 
 # Database instances
 db = Database()
-stock_api = StockAPI()
+stock_api = YFinanceAPI()
 kabutan_api = KabutanAPI()
 notifier = DiscordNotifier()
 
@@ -327,7 +327,7 @@ def _do_check(market='jp'):
     notifier.send_message(f"📊 **{report_header}**")
 
     # Check earnings dates
-    notify_days_before = Config.DEFAULT_NOTIFY_DAYS_BEFORE
+    notify_days_before = int(os.getenv("DEFAULT_NOTIFY_DAYS_BEFORE", "3"))
     earnings_stocks_to_notify = []
     all_stocks = db.get_all_stocks()
 
@@ -370,7 +370,7 @@ def _do_check(market='jp'):
         print("No earnings notifications to send")
 
     # Check price changes
-    price_change_threshold = Config.PRICE_CHANGE_THRESHOLD
+    price_change_threshold = float(os.getenv("PRICE_CHANGE_THRESHOLD", "5.0"))
     price_change_stocks = db.get_stocks_with_price_change(threshold=price_change_threshold, market=market)
 
     # Send price change notifications

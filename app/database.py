@@ -2,7 +2,7 @@
 import sqlite3
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict
-from config import Config
+import os
 from pathlib import Path
 
 
@@ -16,7 +16,7 @@ class Database:
         Args:
             db_path: Database file path
         """
-        self.db_path = db_path or Config.DB_PATH
+        self.db_path = db_path or os.getenv("DB_PATH", "data/stock_watchlist.db")
         self._init_database()
 
     def _init_database(self):
@@ -567,10 +567,21 @@ class Database:
             True if successfully calculated and saved, False otherwise
         """
         try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+
             # Get latest 76 days of price history (75 for MA75 + 1 for previous day comparison)
-            history = self.get_price_history(stock_code, limit=76)
+            cursor.execute("""
+                SELECT date, close FROM price_history
+                WHERE stock_code = ?
+                ORDER BY date DESC
+                LIMIT 76
+            """, (stock_code,))
+            history = [dict(row) for row in cursor.fetchall()]
 
             if len(history) < 25:
+                cursor.close()
+                conn.close()
                 return False
 
             # Reverse to get chronological order (oldest to newest)
@@ -578,9 +589,6 @@ class Database:
 
             # Extract close prices
             close_prices = [h['close'] for h in history]
-
-            conn = self.get_connection()
-            cursor = conn.cursor()
 
             # Calculate and update MA for latest date
             if len(close_prices) >= 25:

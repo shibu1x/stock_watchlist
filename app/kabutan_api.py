@@ -78,6 +78,87 @@ class KabutanAPI:
         return None
 
     @staticmethod
+    def _get_finance_value(soup: BeautifulSoup, column_name: str, label: str,
+                           verbose: bool = False) -> Optional[float]:
+        """
+        Extract a single value from a Kabutan finance table column.
+
+        Tries forecast (予) rows first, falls back to actual results.
+
+        Args:
+            soup: BeautifulSoup object of the finance page
+            column_name: Column header to search for (e.g., '修正1株益')
+            label: Human-readable label for log messages (e.g., 'EPS')
+            verbose: Display detailed logs
+
+        Returns:
+            Numeric value or None if not found
+        """
+        try:
+            for table in soup.find_all('table'):
+                headers = table.find_all('th', scope='col')
+                header_texts = [h.get_text(strip=True).replace('\n', '').replace(' ', '')
+                                for h in headers]
+
+                col_index = next((i for i, t in enumerate(header_texts) if column_name in t), None)
+                if col_index is None:
+                    continue
+
+                # Adjust index: first column is th (決算期), so td indices are shifted by -1
+                td_index = col_index - 1
+
+                tbody = table.find('tbody')
+                if not tbody:
+                    continue
+
+                data_rows = tbody.find_all('tr')
+
+                # Two-pass: try forecast (予) first, then fall back to actual results
+                for forecast_only in (True, False):
+                    if not forecast_only and verbose:
+                        print(f"  → Forecast not available, falling back to actual results")
+
+                    for row in reversed(data_rows):
+                        row_th = row.find('th', scope='row')
+                        if not row_th or 'oc_btn' in str(row.get('class', [])):
+                            continue
+
+                        period = row_th.get_text(strip=True)
+                        is_forecast = '予' in period
+
+                        if forecast_only != is_forecast:
+                            continue
+
+                        # Skip comparison rows
+                        if '前期比' in period or '前年同期比' in period or '同期比' in period:
+                            if verbose and not forecast_only:
+                                print(f"  ⊘ Skipping {period}: Comparison data")
+                            continue
+
+                        cells = row.find_all('td')
+                        if len(cells) > td_index >= 0:
+                            cell_text = cells[td_index].get_text(strip=True)
+                            if cell_text == '－':
+                                if verbose:
+                                    kind = 'Forecast ' if forecast_only else ''
+                                    print(f"  ⊘ Skipping {period}: {kind}{label} is '－'")
+                                continue
+                            value = KabutanAPI._extract_number(cell_text)
+                            if value is not None:
+                                if verbose:
+                                    kind = 'Forecast' if forecast_only else 'Actual'
+                                    print(f"  ✓ Successfully retrieved {label}: {value} ({period} - {kind})")
+                                return value
+
+        except Exception as e:
+            if verbose:
+                print(f"  ✗ Kabutan error: {e}")
+
+        if verbose:
+            print(f"  ✗ Failed to find {label} data")
+        return None
+
+    @staticmethod
     def get_eps(code: str, verbose: bool = False) -> Optional[float]:
         """
         Get revised EPS (修正1株益) from Kabutan
@@ -91,116 +172,12 @@ class KabutanAPI:
         """
         if verbose:
             print(f"Retrieving EPS from Kabutan: {code}")
-
-        # Get finance page
         soup = KabutanAPI._get_page_content(code, page_type='finance')
         if not soup:
             if verbose:
                 print(f"  ✗ Failed to retrieve finance page")
             return None
-
-        try:
-            # Look for tables with "修正1株益" header
-            tables = soup.find_all('table')
-            for table in tables:
-                # Find header row
-                headers = table.find_all('th', scope='col')
-                header_texts = [h.get_text(strip=True).replace('\n', '').replace(' ', '')
-                               for h in headers]
-
-                # Check if this table has "修正1株益" column
-                eps_col_index = None
-                for i, text in enumerate(header_texts):
-                    if '修正1株益' in text:
-                        eps_col_index = i
-                        break
-
-                if eps_col_index is not None:
-                    # Adjust index: first column is th (決算期), so td indices are shifted by -1
-                    td_index = eps_col_index - 1
-
-                    tbody = table.find('tbody')
-                    if tbody:
-                        data_rows = tbody.find_all('tr')
-
-                        # Step 1: Try to find company forecast (予) first
-                        for row in reversed(data_rows):
-                            if row.find('th', scope='row') is None:
-                                continue
-
-                            row_th = row.find('th', scope='row')
-                            if not row_th or 'oc_btn' in str(row.get('class', [])):
-                                continue
-
-                            period = row_th.get_text(strip=True)
-
-                            # Only look for forecast data (marked with "予")
-                            if '予' not in period:
-                                continue
-
-                            # Skip comparison rows
-                            if '前期比' in period or '前年同期比' in period or '同期比' in period:
-                                continue
-
-                            cells = row.find_all('td')
-                            if len(cells) > td_index >= 0:
-                                eps_text = cells[td_index].get_text(strip=True)
-                                # Check if forecast data is available
-                                if eps_text == '－':
-                                    if verbose:
-                                        print(f"  ⊘ Skipping {period}: Forecast EPS is '－'")
-                                    continue
-                                eps_value = KabutanAPI._extract_number(eps_text)
-                                if eps_value is not None:
-                                    if verbose:
-                                        print(f"  ✓ Successfully retrieved EPS: {eps_value} ({period} - Forecast)")
-                                    return eps_value
-
-                        # Step 2: Fallback to actual results if forecast not found
-                        if verbose:
-                            print(f"  → Forecast not available, falling back to actual results")
-
-                        for row in reversed(data_rows):
-                            if row.find('th', scope='row') is None:
-                                continue
-
-                            row_th = row.find('th', scope='row')
-                            if not row_th or 'oc_btn' in str(row.get('class', [])):
-                                continue
-
-                            period = row_th.get_text(strip=True)
-
-                            # Skip forecast data
-                            if '予' in period:
-                                continue
-
-                            # Skip comparison rows
-                            if '前期比' in period or '前年同期比' in period or '同期比' in period:
-                                if verbose:
-                                    print(f"  ⊘ Skipping {period}: Comparison data")
-                                continue
-
-                            cells = row.find_all('td')
-                            if len(cells) > td_index >= 0:
-                                eps_text = cells[td_index].get_text(strip=True)
-                                if eps_text == '－':
-                                    if verbose:
-                                        print(f"  ⊘ Skipping {period}: EPS is '－'")
-                                    continue
-                                eps_value = KabutanAPI._extract_number(eps_text)
-                                if eps_value is not None:
-                                    if verbose:
-                                        print(f"  ✓ Successfully retrieved EPS: {eps_value} ({period} - Actual)")
-                                    return eps_value
-
-            if verbose:
-                print(f"  ✗ Failed to find EPS data")
-            return None
-
-        except Exception as e:
-            if verbose:
-                print(f"  ✗ Kabutan error: {e}")
-            return None
+        return KabutanAPI._get_finance_value(soup, '修正1株益', 'EPS', verbose)
 
     @staticmethod
     def get_dividend(code: str, verbose: bool = False) -> Optional[float]:
@@ -216,121 +193,19 @@ class KabutanAPI:
         """
         if verbose:
             print(f"Retrieving dividend from Kabutan: {code}")
-
-        # Get finance page
         soup = KabutanAPI._get_page_content(code, page_type='finance')
         if not soup:
             if verbose:
                 print(f"  ✗ Failed to retrieve finance page")
             return None
-
-        try:
-            # Look for tables with "修正1株配" header
-            tables = soup.find_all('table')
-            for table in tables:
-                # Find header row
-                headers = table.find_all('th', scope='col')
-                header_texts = [h.get_text(strip=True).replace('\n', '').replace(' ', '')
-                               for h in headers]
-
-                # Check if this table has "修正1株配" column
-                div_col_index = None
-                for i, text in enumerate(header_texts):
-                    if '修正1株配' in text:
-                        div_col_index = i
-                        break
-
-                if div_col_index is not None:
-                    # Adjust index: first column is th (決算期), so td indices are shifted by -1
-                    td_index = div_col_index - 1
-
-                    tbody = table.find('tbody')
-                    if tbody:
-                        data_rows = tbody.find_all('tr')
-
-                        # Step 1: Try to find company forecast (予) first
-                        for row in reversed(data_rows):
-                            if row.find('th', scope='row') is None:
-                                continue
-
-                            row_th = row.find('th', scope='row')
-                            if not row_th or 'oc_btn' in str(row.get('class', [])):
-                                continue
-
-                            period = row_th.get_text(strip=True)
-
-                            # Only look for forecast data (marked with "予")
-                            if '予' not in period:
-                                continue
-
-                            # Skip comparison rows
-                            if '前期比' in period or '前年同期比' in period or '同期比' in period:
-                                continue
-
-                            cells = row.find_all('td')
-                            if len(cells) > td_index >= 0:
-                                div_text = cells[td_index].get_text(strip=True)
-                                # Check if forecast data is available
-                                if div_text == '－':
-                                    if verbose:
-                                        print(f"  ⊘ Skipping {period}: Forecast dividend is '－'")
-                                    continue
-                                div_value = KabutanAPI._extract_number(div_text)
-                                if div_value is not None:
-                                    if verbose:
-                                        print(f"  ✓ Successfully retrieved dividend: {div_value} ({period} - Forecast)")
-                                    return div_value
-
-                        # Step 2: Fallback to actual results if forecast not found
-                        if verbose:
-                            print(f"  → Forecast not available, falling back to actual results")
-
-                        for row in reversed(data_rows):
-                            if row.find('th', scope='row') is None:
-                                continue
-
-                            row_th = row.find('th', scope='row')
-                            if not row_th or 'oc_btn' in str(row.get('class', [])):
-                                continue
-
-                            period = row_th.get_text(strip=True)
-
-                            # Skip forecast data
-                            if '予' in period:
-                                continue
-
-                            # Skip comparison rows
-                            if '前期比' in period or '前年同期比' in period or '同期比' in period:
-                                if verbose:
-                                    print(f"  ⊘ Skipping {period}: Comparison data")
-                                continue
-
-                            cells = row.find_all('td')
-                            if len(cells) > td_index >= 0:
-                                div_text = cells[td_index].get_text(strip=True)
-                                if div_text == '－':
-                                    if verbose:
-                                        print(f"  ⊘ Skipping {period}: Dividend is '－'")
-                                    continue
-                                div_value = KabutanAPI._extract_number(div_text)
-                                if div_value is not None:
-                                    if verbose:
-                                        print(f"  ✓ Successfully retrieved dividend: {div_value} ({period} - Actual)")
-                                    return div_value
-
-            if verbose:
-                print(f"  ✗ Failed to find dividend data")
-            return None
-
-        except Exception as e:
-            if verbose:
-                print(f"  ✗ Kabutan error: {e}")
-            return None
+        return KabutanAPI._get_finance_value(soup, '修正1株配', 'dividend', verbose)
 
     @staticmethod
     def get_stock_info(code: str, verbose: bool = False) -> Optional[Dict]:
         """
         Get comprehensive stock information from Kabutan
+
+        Fetches the finance page once and extracts both EPS and dividend.
 
         Args:
             code: Stock code (4-digit, e.g., "7203")
@@ -339,8 +214,16 @@ class KabutanAPI:
         Returns:
             Dictionary containing EPS and dividend, or None if unable to retrieve
         """
-        eps = KabutanAPI.get_eps(code, verbose=verbose)
-        dividend = KabutanAPI.get_dividend(code, verbose=verbose)
+        if verbose:
+            print(f"Retrieving EPS and dividend from Kabutan: {code}")
+        soup = KabutanAPI._get_page_content(code, page_type='finance')
+        if not soup:
+            if verbose:
+                print(f"  ✗ Failed to retrieve finance page")
+            return None
+
+        eps = KabutanAPI._get_finance_value(soup, '修正1株益', 'EPS', verbose)
+        dividend = KabutanAPI._get_finance_value(soup, '修正1株配', 'dividend', verbose)
 
         if eps is None and dividend is None:
             return None

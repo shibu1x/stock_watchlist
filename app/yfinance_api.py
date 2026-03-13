@@ -4,7 +4,7 @@ from typing import Optional, Dict
 from datetime import datetime
 
 
-class StockAPI:
+class YFinanceAPI:
     """Stock data retrieval class"""
 
     @staticmethod
@@ -42,7 +42,7 @@ class StockAPI:
             Dictionary of stock information, or None if unable to retrieve
         """
         try:
-            ticker = StockAPI.format_jp_ticker(code)
+            ticker = YFinanceAPI.format_jp_ticker(code)
             stock = yf.Ticker(ticker)
             info = stock.info
 
@@ -110,7 +110,7 @@ class StockAPI:
             Returns None if unable to retrieve
         """
         try:
-            ticker = StockAPI.format_jp_ticker(code)
+            ticker = YFinanceAPI.format_jp_ticker(code)
             stock = yf.Ticker(ticker)
 
             # Get historical data
